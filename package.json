@@ -1,0 +1,17 @@
+{
+  "name": "openmes-connector",
+  "version": "0.1.0",
+  "description": "Conector jkcontrol.online → OpenMES: lê a API REST do jkcontrol e alimenta o OpenMES",
+  "type": "module",
+  "main": "src/index.js",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "once": "node src/index.js --once",
+    "test": "node --test test/*.test.js"
+  }
+}

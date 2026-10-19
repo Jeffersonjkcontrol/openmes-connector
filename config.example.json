@@ -1,0 +1,12 @@
+{
+  "machines": [
+    {
+      "device": "injetora01",
+      "workstation_id": 1,
+      "connection_id": 1,
+      "signals": ["estado", "produzido", "refugo"],
+      "operator_variable": "operador",
+      "reason_variable": "motivo_parada"
+    }
+  ]
+}
