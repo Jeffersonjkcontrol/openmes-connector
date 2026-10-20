@@ -57,7 +57,9 @@ Regras para o firmware, que vêm da ingestão do jkcontrol e do OpenMES:
 3. **Usuário do conector**: crie um usuário com papel **Supervisor**, entre uma vez pela interface e troque a senha.
    Enquanto a troca estiver pendente, o token dele só serve para trocar a senha e o conector avisa isso no log.
 4. **Conectividade**: crie uma conexão do tipo **REST** e, para cada máquina, tags vinculadas à máquina com o endereço
-   `{dispositivo}/{variável}`:
+   `{dispositivo}/{variável}`. A interface do OpenMES v0.27.0 só cria conexões Modbus, OPC UA e MQTT; a REST é
+   criada pelos models do próprio OpenMES, como faz o `sim/preparar-openmes.php` (veja
+   [Testar sem o jkcontrol](#testar-sem-o-jkcontrol-simulador)):
    - `injetora01/estado` — sinal *state*, mapa de valores `{"0":"STOPPED","1":"RUNNING","2":"FAULT"}`.
      A parada abre e fecha sozinha (STOPPED/FAULT = não planejada).
    - `injetora01/produzido` — *good_count*; `injetora01/refugo` — *reject_count*. A contagem vai para a ordem de
@@ -126,15 +128,59 @@ Com o OpenMES no Docker Desktop da mesma máquina, use `OPENMES_URL=http://host.
   ao fuso configurado no OpenMES.
 - **Recomeçar do zero**: apague `data/state.json`. O próximo ciclo relê `INITIAL_LOOKBACK_MINUTES`.
 
+## Testar sem o jkcontrol (simulador)
+
+A pasta `sim/` tem um jkcontrol simulado para testar o conector ponta a ponta contra um OpenMES de teste, sem tocar
+na produção:
+
+- `sim/servidor.js`: responde a API de histórico como o jkcontrol (token, janela, paginação) e recebe as leituras por
+  `POST /sim/publicar` no lugar do MQTT, com as mesmas regras (valor numérico, até 30 dias para trás e 5 min para
+  frente, só a última leitura em 250 ms). `GET /sim/series` mostra o que está guardado.
+- `sim/maquina.js`: publica o que o leitor da máquina publicaria.
+  - `historico [minutos]`: grava um turno de exemplo terminando agora (login do cartão, produção, parada com motivo
+    `12`, falha com `breakdown`, logout). Só para um dispositivo sem leituras.
+  - `ao-vivo`: continua produzindo, parando e retomando até Ctrl+C.
+- `sim/preparar-openmes.php`: cria no OpenMES de teste o usuário `conector` (Supervisor, sem troca de senha
+  pendente), o funcionário `TESTE-01` com o cartão `04:A1:B2:C3`, o motivo `12`, a conexão REST e as tags
+  `torno01/*` no posto `LATHE-01` (do exemplo *Precision machine shop*). Pode rodar de novo.
+
+Com o OpenMES do `install.sh --dev` (containers `openmes-52q-*`), tudo em containers Node na rede dele:
+
+```bash
+# 1. OpenMES: imprime os ids para o config.json (device "torno01")
+SENHA=$(head -c 48 /dev/urandom | base64 | tr -dc A-Za-z0-9 | cut -c1-32)
+CONECTOR_SENHA="$SENHA" docker exec -i -e CONECTOR_SENHA openmes-52q-backend php < sim/preparar-openmes.php
+#    .env: JKCONTROL_URL=http://jk-simulador:8090   JKCONTROL_TOKEN=ag_simulador
+#          OPENMES_URL=http://openmes-52q-backend:8000   OPENMES_USERNAME=conector   OPENMES_PASSWORD=$SENHA
+
+# 2. Simulador
+docker run -d --name jk-simulador --user 1000:1000 --network openmes-52q_openmmes-network -p 8090:8090 \
+  -v "$PWD:/app" -w /app -e SIM_ARQUIVO=/app/data/simulador.json node:20-alpine node sim/servidor.js
+
+# 3. Um turno de 40 min e um ciclo do conector
+docker run --rm --user 1000:1000 --network openmes-52q_openmmes-network -v "$PWD:/app" -w /app \
+  -e SIM_URL=http://jk-simulador:8090 node:20-alpine node sim/maquina.js historico 40
+docker run --rm --user 1000:1000 --network openmes-52q_openmmes-network -v "$PWD:/app" -w /app \
+  node:20-alpine node src/index.js --once
+```
+
+Para ver a máquina andando nas telas do OpenMES, rode `sim/maquina.js ao-vivo` e o conector sem `--once`. Para
+recomeçar: `docker rm -f jk-simulador` e apague `data/simulador.json` e `data/state.json`.
+
+Validado assim em 19/10/2026 (turno de 40 min e mais ~1 min ao vivo): estados e paradas na hora local, motivos `12`
+e `breakdown` aplicados pelo usuário `conector`, duas sessões do cartão virando atividade no apontamento, contadores
+somando 218 boas e 7 refugos, e um segundo ciclo sem reenvio. Sem ordem de produção configurada no contador, a
+contagem fica como eventos de contador da máquina (modo legado do OpenMES).
+
 ## Testes
 
 ```bash
 npm test
 ```
 
-São 25 testes, incluindo um ciclo completo por HTTP contra um jkcontrol e um OpenMES simulados (paginação, token
-expirando, ordem de entrega e fuso). O fluxo também foi validado contra o OpenMES v0.27.0 real com PostgreSQL e o
-módulo ativado:
+São 31 testes, incluindo um ciclo completo por HTTP contra um jkcontrol e um OpenMES simulados (paginação, token
+expirando, ordem de entrega e fuso) e o simulador lido pelo próprio cliente do conector. O fluxo também foi validado
+contra o OpenMES v0.27.0 real com PostgreSQL e o módulo ativado:
 - estados gravados na hora local;
 - parada aberta e fechada pelo estado, com o motivo `12` aplicado;
 - sessão do operador virando atividade no apontamento;
