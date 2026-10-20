@@ -1,13 +1,13 @@
 # openmes-connector
 
-Serviço que lê os dados das máquinas na **API do jkcontrol.online** e alimenta o **OpenMES**:
+Serviço que lê os dados das máquinas na **API do jkcontrol.online** ou da **Ubidots** e alimenta o **OpenMES**:
 estado da máquina, contadores, login/logout de operador por cartão RFID e motivo de parada.
 
 ```
-dispositivo ──MQTT──▶ jkcontrol.online ──API REST (leitura)──▶ conector ──API REST──▶ OpenMES
+dispositivo ──MQTT──▶ jkcontrol.online ou Ubidots ──API REST (leitura)──▶ conector ──API REST──▶ OpenMES
 ```
 
-O conector só **lê** o jkcontrol.online (token de leitura) — nada muda na plataforma em produção.
+O conector só **lê** a plataforma (token de leitura) — nada muda nela.
 
 Repositórios do projeto:
 
@@ -21,9 +21,10 @@ Repositórios do projeto:
 
 A cada ciclo (15 s), para cada variável configurada:
 
-1. Lê o histórico no jkcontrol desde o último ciclo, **menos uma janela de sobreposição** (15 min)
+1. Lê o histórico no jkcontrol (ou na Ubidots) desde o último ciclo, **menos uma janela de sobreposição** (15 min)
    que pega leituras que chegaram com atraso. A leitura é paginada e com janela fechada.
-2. Descarta o que já foi entregue (pelo `_id` da leitura).
+2. Descarta o que já foi entregue (pelo `_id` da leitura no jkcontrol; pelo horário do ponto na Ubidots, que guarda
+   um ponto por horário em cada variável).
 3. Junta tudo, **ordena pelo horário do dispositivo** e entrega ao OpenMES nessa ordem:
    - estado e contadores → endpoint nativo `POST /api/v1/machine-connections/{id}/signals`, em lote;
    - cartão de OP → `POST /api/v1/jk/workstations/{id}/work-order` (módulo JkControl, versão 0.2.0 ou mais nova):
@@ -74,6 +75,22 @@ Regras para o firmware, que vêm da ingestão do jkcontrol e do OpenMES:
 
 No jkcontrol.online: gere um token de API `ag_...` com papel **viewer** na organização do cliente.
 
+## Ler da Ubidots
+
+Com `SOURCE=ubidots`, o conector lê a API v1.6 da Ubidots
+(`GET /api/v1.6/devices/{dispositivo}/{variável}/values/`, token no cabeçalho `X-Auth-Token`). O `config.json` é o
+mesmo: `device` é o label do dispositivo na Ubidots e as variáveis são os labels delas. Os pontos da Ubidots também
+têm `context`, então `card_field` e `code_field` funcionam igual.
+
+- **Token só do conector.** A Ubidots limita as requisições **por token** (4 por segundo no padrão). Se o conector
+  usar o mesmo token com que as máquinas publicam, ele gasta o limite delas e a Ubidots pode recusar dados da
+  produção. Crie um token separado para o conector.
+- **Ritmo**: o conector espaça as chamadas (no máximo ~3 por segundo) e faz uma chamada por variável e página. Cada
+  ciclo leva cerca de *máquinas × variáveis × 0,3 s*: 3 máquinas com 5 variáveis ≈ 5 s, 45 máquinas ≈ 70 s. Para
+  muitas máquinas, use `POLL_INTERVAL_SECONDS=60` ou mais.
+- **Endereço**: `UBIDOTS_URL` é `https://industrial.api.ubidots.com` por padrão (contas Industrial). Contas antigas
+  ou STEM podem usar outro endereço; confira no painel da Ubidots.
+
 ## Configurar
 
 ```bash
@@ -85,12 +102,15 @@ cp config.example.json config.json   # máquinas
 
 | Campo | |
 |---|---|
-| `device` | label do dispositivo no jkcontrol |
+| `device` | label do dispositivo no jkcontrol ou na Ubidots |
 | `workstation_id` | id da máquina no OpenMES (obrigatório com `operator_variable`/`reason_variable`) |
 | `connection_id` | id da conexão REST no OpenMES (obrigatório com `signals`) |
-| `signals` | variáveis de estado/contador. O endereço da tag é `{device}/{variável}`; para outro, use `{"variable": "estado", "node_id": "INJ01.state"}`. Para uma variável que traz a **contagem do período** (zera a cada envio), use `{"variable": "injecao_hora", "accumulate": "sum"}`: o conector entrega o total acumulado, que é o que o contador do OpenMES espera |
+| `signals` | variáveis de estado/contador. O endereço da tag é `{device}/{variável}`; para outro, use `{"variable": "estado", "node_id": "INJ01.state"}`. O contador do OpenMES espera um **total que só cresce**; para outras contagens, `accumulate` converte: `"sum"` para a **contagem do período** (zera a cada envio: soma as parcelas) e `"running"` para a **contagem corrente** (o equipamento republica o total, que só zera num evento como a troca de OP: soma só o que cresceu). Com `"running"`, `"reset_field": "op_rfid"` diz em qual campo do `context` a troca marca o zeramento |
 | `operator_variable` | variável do cartão RFID. Se o UID vem em outro campo do `context`, use `{"variable": "fun_rfid", "card_field": "fun_rfid"}` |
 | `reason_variable` | variável do motivo de parada. Se o código vem num campo do `context` (e o valor é sempre 1), use `{"variable": "maq_rfid", "code_field": "maq_rfid"}` |
+| `quality_variable` | cartão de qualidade, com o resultado num campo do `context`: `{"variable": "quali_rfid", "status_field": "status"}` (`aprovado`/`reprovado`). Vira uma inspeção na OP que roda no posto (módulo JkControl 0.3.0); sem OP rodando, é recusado com aviso |
+| `changeover_variable` | troca de molde/ferramenta: `{"variable": "regmolde_rfid", "card_field": "regmolde_rfid", "reason_code": "changeover"}`. A parada daquele momento recebe o motivo `reason_code` e o crachá de quem trocou fica anotado nela (módulo JkControl 0.3.0) |
+| `order_context_field` | campo do `context` em que cada leitura de sinal (ciclo, contagem) diz de qual OP ela é, ex. `"op_rfid"`. Essa OP manda: quando ela muda (ou na primeira leitura da máquina), o conector inicia a OP no posto **antes** de lançar a leitura, mesmo sem cartão de OP. OP que o OpenMES não pode rodar (não cadastrada, encerrada…) deixa a máquina **sem OP** (a contagem fica só na máquina), com aviso no log e nova tentativa a cada 15 min. Precisa do módulo JkControl 0.3.0 (`when_blocked: park`) |
 | `order_variable` | variável do cartão de OP (ordem de produção). O número vem no valor ou em `context.order_no`; num campo próprio, use `{"variable": "op_rfid", "code_field": "op_rfid"}`. A OP precisa existir no OpenMES (planejamento, *Admin → Import* ou API do ERP); OP desconhecida, encerrada ou em espera é recusada com aviso no log |
 
 Exemplo para o firmware Nitron v1.5 (injetora), que não segue o contrato acima:
@@ -100,15 +120,18 @@ Exemplo para o firmware Nitron v1.5 (injetora), que não segue o contrato acima:
   "device": "injetora01",
   "workstation_id": 2,
   "connection_id": 2,
-  "signals": ["parada", { "variable": "injecao_hora", "accumulate": "sum" }],
+  "signals": ["parada", { "variable": "injecao_hora", "accumulate": "running", "reset_field": "op_rfid" }],
   "operator_variable": { "variable": "fun_rfid", "card_field": "fun_rfid" },
   "reason_variable": { "variable": "maq_rfid", "code_field": "maq_rfid" },
-  "order_variable": { "variable": "op_rfid", "code_field": "op_rfid" }
+  "order_variable": { "variable": "op_rfid", "code_field": "op_rfid" },
+  "order_context_field": "op_rfid"
 }
 ```
 
 Com tags `injetora01/parada` (*state*, mapa `{"0":"RUNNING","1":"STOPPED"}`) e `injetora01/injecao_hora`
-(*good_count*, escala = cavidades do molde, para contar peças e não injeções).
+(*good_count*, escala = cavidades do molde, para contar peças e não injeções). No firmware Nitron, `injecao_hora` é
+a contagem de injeções **da OP atual**: publicada a cada 15 min (o mesmo total enquanto a máquina está parada) e
+zerada quando passa um cartão de OP, que antes publica o total final com a OP antiga no `context`.
 
 ## Rodar
 
@@ -148,11 +171,21 @@ Com o OpenMES no Docker Desktop da mesma máquina, use `OPENMES_URL=http://host.
 - **Fuso**: o endpoint `/signals` do OpenMES grava o horário recebido sem converter. O conector envia sempre com o
   deslocamento do fuso da fábrica (`2026-10-19T08:00:00.000-03:00`); por isso `OPENMES_TIMEZONE` precisa ser igual
   ao fuso configurado no OpenMES.
-- **Contagem acumulada** (`accumulate`): o total só cresce e fica no `data/state.json`. Contagem que chega atrasada
-  ainda soma, com o horário da última entregue. Por causa do contador "legado" do OpenMES, que usa a primeira leitura
-  como base (não a conta) e guarda o último total em cache por 1 dia:
+- **Contagem por período** (`"accumulate": "sum"`): o total só cresce e fica no `data/state.json`. Contagem que chega
+  atrasada ainda soma, com o horário da última entregue. Por causa do contador "legado" do OpenMES, que usa a primeira
+  leitura como base (não a conta) e guarda o último total em cache por 1 dia:
   - a primeira entrega da série manda antes uma leitura base 0;
   - período sem produção (0) também é enviado, para o cache não expirar num fim de semana parado.
+- **Contagem corrente** (`"accumulate": "running"`): vale só o que cresceu desde a leitura anterior; o total repetido
+  (máquina parada) entra como parcela 0. É zeramento quando o valor cai ou, com `reset_field`, quando a OP do
+  `context` muda: aí a leitura inteira é produção nova. Leitura **sem** o campo no `context` mantém a OP anterior (no
+  firmware Nitron, o cartão de molde troca o `context` para `{"molde": ...}` sem zerar a contagem). A **primeira
+  leitura da série só serve de base**, porque o que ela já contou é de antes do conector; para reexecutar a história
+  desde a primeira leitura do equipamento, grave antes `"corrente": {"valor": 0, "marca": ""}` na série, no
+  `data/state.json`. Leitura atrasada é ignorada: a seguinte já inclui o que ela contou. Limite:
+  passar de novo o cartão da **mesma** OP zera a contagem sem mudar o `context`. O conector só percebe esse zeramento
+  se a leitura seguinte vier menor que a anterior; se a contagem nova já tiver passado do total anterior, o conector
+  deixa de contar o equivalente a esse total.
 - **Lotes de 100 leituras e 60 s de espera** no OpenMES. O contador "legado" do OpenMES (sem ordem configurada) não
   ignora leitura repetida: se uma chamada estoura o tempo depois de o OpenMES gravar, o reenvio conta de novo.
   Lote pequeno mantém cada chamada longe do limite.
@@ -167,7 +200,9 @@ na produção:
 
 - `sim/servidor.js`: responde a API de histórico como o jkcontrol (token, janela, paginação) e recebe as leituras por
   `POST /sim/publicar` no lugar do MQTT, com as mesmas regras (valor numérico, até 30 dias para trás e 5 min para
-  frente, só a última leitura em 250 ms). `GET /sim/series` mostra o que está guardado.
+  frente, só a última leitura em 250 ms). `GET /sim/series` mostra o que está guardado. As mesmas séries saem também
+  no formato da Ubidots (`/api/v1.6/devices/{dispositivo}/{variável}/values/`, token `SIM_TOKEN` no `X-Auth-Token`):
+  com `SOURCE=ubidots`, `UBIDOTS_URL=http://jk-simulador:8090` e `UBIDOTS_TOKEN=ag_simulador`, o teste é o mesmo.
 - `sim/maquina.js`: publica o que o leitor da máquina publicaria.
   - `historico [minutos]`: grava um turno de exemplo terminando agora (login do cartão, produção, parada com motivo
     `12`, falha com `breakdown`, logout). Só para um dispositivo sem leituras.
@@ -210,8 +245,9 @@ contagem fica como eventos de contador da máquina (modo legado do OpenMES).
 npm test
 ```
 
-São 41 testes, incluindo um ciclo completo por HTTP contra um jkcontrol e um OpenMES simulados (paginação, token
-expirando, ordem de entrega e fuso) e o simulador lido pelo próprio cliente do conector. O fluxo também foi validado
+São 61 testes, incluindo ciclos completos por HTTP contra um jkcontrol, uma Ubidots e um OpenMES simulados
+(paginação, token expirando, ordem de entrega, fuso, contagem por período e corrente, cartão de OP), o simulador lido
+pelos próprios clientes do conector e o espaçamento das chamadas à Ubidots. O fluxo também foi validado
 contra o OpenMES v0.27.0 real com PostgreSQL e o módulo ativado:
 - estados gravados na hora local;
 - parada aberta e fechada pelo estado, com o motivo `12` aplicado;

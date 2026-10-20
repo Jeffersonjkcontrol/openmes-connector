@@ -9,7 +9,9 @@ import { dirname } from 'node:path';
  *  - ultimoTs: horário da leitura mais nova já entregue (sinais de máquina não
  *    podem andar para trás — ver sync.js);
  *  - total: nas séries com "accumulate", o total já entregue ao OpenMES. Apagar
- *    o estado zera o total, e o OpenMES trava o contador (reset_required).
+ *    o estado zera o total, e o OpenMES trava o contador (reset_required);
+ *  - corrente: com "accumulate": "running", a última contagem lida do
+ *    equipamento e a marca de zeramento (ex.: a OP) dela, já entregues.
  *
  * Gravado de forma atômica (arquivo temporário + rename): uma queda no meio da
  * gravação não corrompe o estado.
@@ -55,6 +57,28 @@ export class Estado {
 
     definirTotal(chave, total) {
         this.serie(chave).total = total;
+    }
+
+    /**
+     * OP que o conector pôs (ou tentou pôr) na máquina: {op, bloqueada,
+     * tentativa}. "bloqueada": o OpenMES não pôde iniciá-la (não cadastrada,
+     * encerrada…), e o conector tenta de novo de tempos em tempos.
+     */
+    opDaMaquina(dispositivo) {
+        return this.dados.maquinas?.[dispositivo] ?? null;
+    }
+
+    definirOpDaMaquina(dispositivo, info) {
+        this.dados.maquinas ??= {};
+        this.dados.maquinas[dispositivo] = info;
+    }
+
+    corrente(chave) {
+        return this.serie(chave).corrente ?? null;
+    }
+
+    definirCorrente(chave, corrente) {
+        this.serie(chave).corrente = corrente;
     }
 
     avancarCursor(chave, ate) {

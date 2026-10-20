@@ -1,7 +1,7 @@
 {
   "name": "openmes-connector",
   "version": "0.1.0",
-  "description": "Conector jkcontrol.online → OpenMES: lê a API REST do jkcontrol e alimenta o OpenMES",
+  "description": "Conector jkcontrol.online/Ubidots → OpenMES: lê a API REST da plataforma e alimenta o OpenMES",
   "type": "module",
   "main": "src/index.js",
   "private": true,

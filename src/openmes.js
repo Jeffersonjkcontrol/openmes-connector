@@ -91,4 +91,9 @@ export class OpenMesClient {
     motivoParada(estacaoId, payload) {
         return this.chamar('POST', `/api/v1/jk/workstations/${estacaoId}/downtime-reason`, payload);
     }
+
+    /** Cartão de qualidade lido na máquina: inspeção na OP que roda no posto — módulo JkControl 0.3.0. */
+    registrarQualidade(estacaoId, payload) {
+        return this.chamar('POST', `/api/v1/jk/workstations/${estacaoId}/quality-check`, payload);
+    }
 }

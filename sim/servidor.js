@@ -7,7 +7,11 @@
 //  - duas leituras da mesma variável a menos de 250 ms uma da outra: fica só a
 //    última (o buffer de ingestão do jkcontrol).
 //
+// As mesmas séries também saem no formato da API v1.6 da Ubidots, para testar o
+// conector com SOURCE=ubidots.
+//
 //   GET  /api/devices/{dispositivo}/variables/{variável}/data   (Bearer token)
+//   GET  /api/v1.6/devices/{dispositivo}/{variável}/values/     (X-Auth-Token, formato Ubidots)
 //   POST /sim/publicar   {device, variable, value, context?, timestamp?}
 //   GET  /sim/series     o que está guardado (sem token, é ferramenta local)
 //   GET  /sim/ultimo?device=&variable=
@@ -81,14 +85,19 @@ export class Armazem {
         return leitura;
     }
 
-    /** Uma página do histórico, como a API real: do mais novo para o mais antigo, cada página em ordem cronológica. */
-    pagina(chave, { inicio, fim, pagina, porPagina }) {
-        const janela = (this.series.get(chave) ?? [])
+    /** Leituras da série dentro da janela, do mais novo para o mais antigo. */
+    janela(chave, inicio, fim) {
+        return (this.series.get(chave) ?? [])
             .filter((i) => {
                 const t = Date.parse(i.timestamp);
                 return t >= inicio && t <= fim;
             })
             .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+    }
+
+    /** Uma página do histórico, como a API real: do mais novo para o mais antigo, cada página em ordem cronológica. */
+    pagina(chave, { inicio, fim, pagina, porPagina }) {
+        const janela = this.janela(chave, inicio, fim);
 
         const fatia = janela
             .slice((pagina - 1) * porPagina, pagina * porPagina)
@@ -101,6 +110,27 @@ export class Armazem {
             perPage: porPagina,
             totalItems: janela.length,
             totalPages: Math.ceil(janela.length / porPagina),
+        };
+    }
+
+    /**
+     * Uma página no formato da Ubidots (v1.6): tudo do mais novo para o mais
+     * antigo, horários em ms, `count` sem o total e o fim dado por `next` nulo.
+     */
+    paginaUbidots(chave, { inicio, fim, pagina, porPagina, enderecoDaPagina }) {
+        const janela = this.janela(chave, inicio, fim);
+        const fatia = janela.slice((pagina - 1) * porPagina, pagina * porPagina);
+
+        return {
+            count: true,
+            next: pagina * porPagina < janela.length ? enderecoDaPagina(pagina + 1) : null,
+            previous: pagina > 1 ? enderecoDaPagina(pagina - 1) : null,
+            results: fatia.map((i) => ({
+                timestamp: Date.parse(i.timestamp),
+                value: i.value,
+                context: i.context,
+                created_at: i.recebidoEm,
+            })),
         };
     }
 
@@ -151,6 +181,32 @@ export function criarServidor({ token, armazem }) {
                 return responder(200, armazem.pagina(chave, { inicio, fim, pagina, porPagina }));
             }
 
+            const ubidots = url.pathname.match(/^\/api\/v1\.6\/devices\/([^/]+)\/([^/]+)\/values\/?$/);
+            if (req.method === 'GET' && ubidots) {
+                if (req.headers['x-auth-token'] !== token) {
+                    return responder(401, { code: 401002, message: 'Incorrect authentication credentials.' });
+                }
+
+                const chave = `${decodeURIComponent(ubidots[1])}/${decodeURIComponent(ubidots[2])}`;
+                if (!armazem.series.has(chave)) return responder(404, { code: 404001, message: 'Not found.' });
+
+                // Sem start/end a Ubidots devolve as mais recentes; aqui: tudo.
+                const inicio = Number(url.searchParams.get('start') ?? 0);
+                const fim = Number(url.searchParams.get('end') ?? Number.MAX_SAFE_INTEGER);
+                const pagina = Number(url.searchParams.get('page') ?? 1);
+                const porPagina = Number(url.searchParams.get('page_size') ?? 100);
+                if (!Number.isFinite(inicio) || !Number.isFinite(fim) || !(pagina >= 1) || !(porPagina >= 1 && porPagina <= 1000)) {
+                    return responder(400, { message: 'start e end em ms; page e page_size (1 a 1000) inteiros.' });
+                }
+
+                const enderecoDaPagina = (n) => {
+                    const outra = new URL(url.pathname + url.search, `http://${req.headers.host}`);
+                    outra.searchParams.set('page', String(n));
+                    return outra.href;
+                };
+                return responder(200, armazem.paginaUbidots(chave, { inicio, fim, pagina, porPagina, enderecoDaPagina }));
+            }
+
             if (req.method === 'POST' && url.pathname === '/sim/publicar') {
                 let texto = '';
                 for await (const parte of req) texto += parte;
@@ -188,7 +244,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     const armazem = new Armazem({ arquivo });
     const servidor = criarServidor({ token, armazem });
     servidor.listen(porta, '0.0.0.0', () => {
-        console.log(`simulador do jkcontrol na porta ${porta} (token ${token}${arquivo ? `, guardando em ${arquivo}` : ''})`);
+        console.log(`simulador do jkcontrol e da Ubidots na porta ${porta} (token ${token}${arquivo ? `, guardando em ${arquivo}` : ''})`);
     });
 
     for (const sinal of ['SIGINT', 'SIGTERM']) {

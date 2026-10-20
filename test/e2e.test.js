@@ -1,6 +1,6 @@
-// Ciclo completo por HTTP de verdade, contra um jkcontrol e um OpenMES falsos
-// que respondem no formato das APIs reais (paginação do histórico, login com
-// token que expira, endpoints de sinais e do módulo JkControl).
+// Ciclo completo por HTTP de verdade, contra um jkcontrol (ou uma Ubidots) e um
+// OpenMES falsos que respondem no formato das APIs reais (paginação do
+// histórico, login com token que expira, endpoints de sinais e do módulo JkControl).
 
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync } from 'node:fs';
@@ -14,6 +14,8 @@ import { silencioso } from '../src/log.js';
 import { OpenMesClient } from '../src/openmes.js';
 import { Estado } from '../src/state.js';
 import { executarCiclo } from '../src/sync.js';
+import { UbidotsClient } from '../src/ubidots.js';
+import { Armazem, criarServidor } from '../sim/servidor.js';
 
 function subir(handler) {
     return new Promise((resolve) => {
@@ -104,6 +106,10 @@ function openmes(req, url, corpo) {
         recebido.push({ tipo: 'operador', ...corpo });
         return [201, { status: 'logged_in' }];
     }
+    if ((m = url.pathname.match(/^\/api\/v1\/jk\/workstations\/(\d+)\/work-order$/))) {
+        recebido.push({ tipo: 'ordem', estacao: Number(m[1]), ...corpo });
+        return [201, { status: 'started' }];
+    }
     if ((m = url.pathname.match(/^\/api\/v1\/jk\/workstations\/(\d+)\/downtime-reason$/))) {
         if (corpo.reason_code === '99') {
             return [422, { message: 'No active downtime reason has this code.', errors: { reason_code: ['No active downtime reason has this code.'] } }];
@@ -189,6 +195,70 @@ test('ciclo completo: pagina o histórico, renova o token e entrega tudo na orde
         config, ...clientes, estado: new Estado(arquivoEstado), log: silencioso, agora: new Date('2026-10-19T10:10:15.000Z'),
     });
     assert.equal(recebido.filter((r) => r.tipo !== 'heartbeat').length, antes);
+});
+
+test('ciclo completo lendo da Ubidots: contagem corrente, cartão e OP no context', async () => {
+    let relogio = Date.parse('2026-10-19T10:30:00.000Z');
+    const armazem = new Armazem({ relogio: () => relogio });
+    const publicar = (variable, value, hora, context) => {
+        relogio += 1000;
+        armazem.publicar({ device: 'injetora07', variable, value, context, timestamp: Date.parse(`2026-10-19T${hora}.000Z`) });
+    };
+    publicar('fun_rfid', 1, '10:00:00', { fun_rfid: 'CRACHA-TESTE' });
+    publicar('op_rfid', 1, '10:00:30', { op_rfid: 'OP-TESTE-1' });
+    publicar('parada', 0, '10:01:00');
+    publicar('injecao_hora', 5, '10:05:00', { op_rfid: 'OP-TESTE-1' });
+    publicar('injecao_hora', 5, '10:10:00', { op_rfid: 'OP-TESTE-1' });
+    publicar('injecao_hora', 12, '10:15:00', { op_rfid: 'OP-TESTE-1' });
+
+    const ubidots = criarServidor({ token: 'BBUS-teste', armazem });
+    await new Promise((resolve) => ubidots.listen(0, '127.0.0.1', resolve));
+
+    try {
+        const config = {
+            fuso: 'America/Sao_Paulo',
+            sobreposicaoMs: 15 * 60_000,
+            retroativoInicialMs: 60 * 60_000,
+            maquinas: normalizarMaquinas([{
+                device: 'injetora07',
+                workstation_id: 7,
+                connection_id: 4,
+                signals: ['parada', { variable: 'injecao_hora', accumulate: 'running', reset_field: 'op_rfid' }],
+                operator_variable: { variable: 'fun_rfid', card_field: 'fun_rfid' },
+                order_variable: { variable: 'op_rfid', code_field: 'op_rfid' },
+            }]),
+        };
+        const antes = recebido.length;
+
+        const resumo = await executarCiclo({
+            config,
+            jk: new UbidotsClient({ baseUrl: `http://127.0.0.1:${ubidots.address().port}`, token: 'BBUS-teste', porPagina: 1, intervaloMinimoMs: 0 }),
+            mes: new OpenMesClient({ baseUrl: mes.url, usuario: 'conector', senha: 'segredo' }),
+            estado: new Estado(null),
+            log: silencioso,
+            agora: new Date('2026-10-19T10:20:00.000Z'),
+        });
+
+        const entregas = recebido.slice(antes).filter((r) => r.tipo !== 'heartbeat');
+        assert.deepEqual(entregas.map((r) => r.tipo), ['operador', 'ordem', 'sinais']);
+
+        const [operador, ordem, sinais] = entregas;
+        assert.deepEqual([operador.card_uid, operador.action, operador.workstation_id], ['CRACHA-TESTE', 'login', 7]);
+        assert.deepEqual([ordem.estacao, ordem.order_no, ordem.occurred_at], [7, 'OP-TESTE-1', '2026-10-19T07:00:30.000-03:00']);
+
+        // Contagem corrente: a primeira é base, a repetida não soma, depois só o que cresceu.
+        assert.equal(sinais.conexao, 4);
+        assert.deepEqual(sinais.leituras.map((l) => `${l.node_id}=${l.value}@${l.ts}`), [
+            'injetora07/parada=0@2026-10-19T07:01:00.000-03:00',
+            'injetora07/injecao_hora=0@2026-10-19T07:05:00.000-03:00',
+            'injetora07/injecao_hora=0@2026-10-19T07:10:00.000-03:00',
+            'injetora07/injecao_hora=7@2026-10-19T07:15:00.000-03:00',
+        ]);
+        assert.ok(sinais.leituras.every((l) => l.event_id.length <= 160));
+        assert.deepEqual([resumo.sinais, resumo.operador, resumo.ordem, resumo.descartados], [4, 1, 1, 0]);
+    } finally {
+        ubidots.close();
+    }
 });
 
 test('usuário que precisa trocar a senha gera erro claro', async () => {

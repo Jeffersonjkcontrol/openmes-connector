@@ -5,6 +5,7 @@ import { log } from './log.js';
 import { OpenMesClient } from './openmes.js';
 import { Estado } from './state.js';
 import { executarCiclo } from './sync.js';
+import { UbidotsClient } from './ubidots.js';
 
 // .env é opcional (no Docker as variáveis já vêm do ambiente).
 try {
@@ -23,7 +24,10 @@ try {
     process.exit(1);
 }
 
-const jk = new JkControlClient({ ...config.jkcontrol, porPagina: config.porPagina });
+const { tipo: fonte, ...acessoFonte } = config.fonte;
+const jk = fonte === 'ubidots'
+    ? new UbidotsClient({ ...acessoFonte, porPagina: config.porPagina })
+    : new JkControlClient({ ...acessoFonte, porPagina: config.porPagina });
 const mes = new OpenMesClient(config.openmes);
 const estado = new Estado(config.arquivoEstado);
 
@@ -37,14 +41,15 @@ for (const sinal of ['SIGINT', 'SIGTERM']) {
     });
 }
 
-log.info(`conector iniciado: ${config.maquinas.length} máquina(s), ciclo a cada ${config.intervaloMs / 1000}s, fuso ${config.fuso}.`);
+log.info(`conector iniciado: lendo ${fonte}, ${config.maquinas.length} máquina(s), ciclo a cada ${config.intervaloMs / 1000}s, fuso ${config.fuso}.`);
 
 let falhasSeguidas = 0;
 while (!parar) {
     try {
         const r = await executarCiclo({ config, jk, mes, estado, log });
-        if (r.sinais || r.ordem || r.operador || r.motivo || r.descartados) {
-            log.info(`ciclo: ${r.sinais} sinal(is), ${r.ordem} OP(s), ${r.operador} cartão(ões), ${r.motivo} motivo(s), ${r.descartados} descartado(s).`);
+        if (r.sinais || r.ordem || r.operador || r.motivo || r.troca || r.qualidade || r.descartados) {
+            const extras = [r.troca && `${r.troca} troca(s) de molde`, r.qualidade && `${r.qualidade} inspeção(ões)`].filter(Boolean);
+            log.info(`ciclo: ${r.sinais} sinal(is), ${r.ordem} OP(s), ${r.operador} cartão(ões), ${r.motivo} motivo(s), ${extras.length ? `${extras.join(', ')}, ` : ''}${r.descartados} descartado(s).`);
         }
         falhasSeguidas = 0;
     } catch (erro) {
