@@ -4,8 +4,14 @@ import { formatarNoFuso } from './time.js';
 /** No mesmo instante, o estado da máquina entra antes do cartão e do motivo. */
 const PRIORIDADE = { sinal: 0, operador: 1, motivo: 2 };
 
-/** Limite do endpoint /signals do OpenMES. */
-const LOTE_MAXIMO = 1000;
+/**
+ * Leituras por chamada ao /signals (o OpenMES aceita até 1000). Lote pequeno
+ * para cada chamada terminar bem antes do tempo limite: se o conector desiste e
+ * o OpenMES termina de gravar, o lote volta no próximo ciclo, e o contador
+ * "legado" do OpenMES não ignora leitura repetida — soma de novo. Visto numa
+ * reexecução de 6 meses: 1000 leituras levaram mais de 15 s num notebook.
+ */
+export const LOTE_MAXIMO = 100;
 
 /**
  * 4xx que não melhoram com nova tentativa (cartão desconhecido, parada não
@@ -25,6 +31,7 @@ export async function executarCiclo({ config, jk, mes, estado, log, agora = new 
     const eventos = [];
     const lidas = [];
     const atrasados = new Map();
+    let parcelasInvalidas = 0;
 
     for (const maquina of config.maquinas) {
         for (const serie of maquina.series) {
@@ -47,8 +54,42 @@ export async function executarCiclo({ config, jk, mes, estado, log, agora = new 
             lidas.push(chave);
 
             const ultimo = estado.ultimoEntregue(chave);
+            let total = estado.total(chave);
+            let semEntregaAinda = ultimo === null && total === 0;
             for (const item of itens) {
                 if (estado.jaVisto(chave, item.id)) continue;
+
+                // Contagem por período (ex.: injecao_hora): vira um total que só
+                // cresce, que é o que o contador do OpenMES espera. O total só é
+                // gravado quando a leitura é entregue (enviarLote), então um ciclo
+                // interrompido refaz a soma do mesmo ponto. Contagem atrasada ainda
+                // soma, com o horário da última entregue: perder peças é pior que
+                // lançá-las alguns minutos depois.
+                if (serie.acumular) {
+                    const parcela = Number(item.value);
+                    if (!Number.isFinite(parcela) || parcela < 0) {
+                        log.warn(`${chave} (${item.ts.toISOString()}): contagem ${item.value} inválida, ignorada.`);
+                        parcelasInvalidas += 1;
+                        estado.marcarVisto(chave, item.id, item.ts);
+                        continue;
+                    }
+
+                    const ts = ultimo !== null && item.ts.getTime() < ultimo ? new Date(ultimo) : item.ts;
+
+                    // O contador "legado" do OpenMES usa a primeira leitura como
+                    // base e não a conta: uma base 0 antes faz a primeira parcela valer.
+                    if (semEntregaAinda && parcela > 0) {
+                        eventos.push({ ...montarEvento(maquina, serie, chave, { ...item, id: `${item.id}:base`, ts, value: 0 }), total: 0 });
+                    }
+                    semEntregaAinda = false;
+
+                    // Período sem produção (0) também vai: o OpenMES guarda o último
+                    // total em cache por 1 dia, e sem leituras a primeira parcela
+                    // depois de um fim de semana parado viraria base e se perderia.
+                    total += parcela;
+                    eventos.push({ ...montarEvento(maquina, serie, chave, { ...item, ts, value: total }), total });
+                    continue;
+                }
 
                 // Sinal de máquina não anda para trás: um estado antigo entregue
                 // depois de um mais novo faria o OpenMES "parar" a máquina agora,
@@ -71,7 +112,12 @@ export async function executarCiclo({ config, jk, mes, estado, log, agora = new 
 
     eventos.sort((a, b) => (a.ts - b.ts) || (PRIORIDADE[a.tipo] - PRIORIDADE[b.tipo]));
 
-    const resumo = { sinais: 0, operador: 0, motivo: 0, descartados: [...atrasados.values()].reduce((s, n) => s + n, 0) };
+    const resumo = {
+        sinais: 0,
+        operador: 0,
+        motivo: 0,
+        descartados: [...atrasados.values()].reduce((s, n) => s + n, 0) + parcelasInvalidas,
+    };
     const ctx = { config, mes, estado, log, resumo };
 
     let lote = null;
@@ -128,16 +174,24 @@ export function montarEvento(maquina, serie, chave, item) {
     if (serie.tipo === 'operador') {
         const valor = Number(item.value);
         const acao = valor === 1 ? 'login' : valor === 0 ? 'logout' : null;
-        const uid = item.context?.uid ?? item.context?.card_uid ?? item.context?.cartao ?? null;
+        const uid = serie.campo
+            ? item.context?.[serie.campo] ?? null
+            : item.context?.uid ?? item.context?.card_uid ?? item.context?.cartao ?? null;
 
         if (!acao) return { ...base, ignorar: `valor ${item.value} não é 1 (login) nem 0 (logout)` };
-        if (!uid) return { ...base, ignorar: 'sem o UID do cartão em context.uid' };
+        if (!uid) return { ...base, ignorar: `sem o UID do cartão em context.${serie.campo ?? 'uid'}` };
 
         return { ...base, estacaoId: maquina.estacaoId, acao, uid: String(uid) };
     }
 
     // motivo de parada: o código vem no valor (o jkcontrol só guarda número);
-    // context.reason_code permite códigos com letras. 0 = "sem motivo".
+    // context.reason_code permite códigos com letras. 0 = "sem motivo". Com
+    // "code_field", o código vem só daquele campo do context (o valor é ignorado).
+    if (serie.campo) {
+        const doCartao = item.context?.[serie.campo];
+        if (!doCartao) return { ...base, ignorar: `sem código em context.${serie.campo}` };
+        return { ...base, estacaoId: maquina.estacaoId, codigo: String(doCartao) };
+    }
     const codigo = item.context?.reason_code ?? (Number(item.value) > 0 ? String(item.value) : null);
     if (!codigo) return { ...base, ignorar: 'motivo 0 (sem motivo)' };
 
@@ -166,7 +220,12 @@ async function enviarLote(lote, { config, mes, estado, log, resumo }) {
         resumo.descartados += leituras.length;
     }
 
-    for (const e of lote.itens) estado.marcarEntregue(e.chave, e.id, e.ts);
+    // Recusa definitiva também grava o total: a próxima leitura leva o OpenMES ao
+    // total certo (ele conta a diferença desde a última que aceitou).
+    for (const e of lote.itens) {
+        estado.marcarEntregue(e.chave, e.id, e.ts);
+        if (e.total !== undefined) estado.definirTotal(e.chave, e.total);
+    }
     estado.salvar();
 }
 

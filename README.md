@@ -84,9 +84,25 @@ cp config.example.json config.json   # máquinas
 | `device` | label do dispositivo no jkcontrol |
 | `workstation_id` | id da máquina no OpenMES (obrigatório com `operator_variable`/`reason_variable`) |
 | `connection_id` | id da conexão REST no OpenMES (obrigatório com `signals`) |
-| `signals` | variáveis de estado/contador. O endereço da tag é `{device}/{variável}`; para outro, use `{"variable": "estado", "node_id": "INJ01.state"}` |
-| `operator_variable` | variável do cartão RFID |
-| `reason_variable` | variável do motivo de parada |
+| `signals` | variáveis de estado/contador. O endereço da tag é `{device}/{variável}`; para outro, use `{"variable": "estado", "node_id": "INJ01.state"}`. Para uma variável que traz a **contagem do período** (zera a cada envio), use `{"variable": "injecao_hora", "accumulate": "sum"}`: o conector entrega o total acumulado, que é o que o contador do OpenMES espera |
+| `operator_variable` | variável do cartão RFID. Se o UID vem em outro campo do `context`, use `{"variable": "fun_rfid", "card_field": "fun_rfid"}` |
+| `reason_variable` | variável do motivo de parada. Se o código vem num campo do `context` (e o valor é sempre 1), use `{"variable": "maq_rfid", "code_field": "maq_rfid"}` |
+
+Exemplo para o firmware Nitron v1.5 (injetora), que não segue o contrato acima:
+
+```json
+{
+  "device": "injetora01",
+  "workstation_id": 2,
+  "connection_id": 2,
+  "signals": ["parada", { "variable": "injecao_hora", "accumulate": "sum" }],
+  "operator_variable": { "variable": "fun_rfid", "card_field": "fun_rfid" },
+  "reason_variable": { "variable": "maq_rfid", "code_field": "maq_rfid" }
+}
+```
+
+Com tags `injetora01/parada` (*state*, mapa `{"0":"RUNNING","1":"STOPPED"}`) e `injetora01/injecao_hora`
+(*good_count*, escala = cavidades do molde, para contar peças e não injeções).
 
 ## Rodar
 
@@ -126,7 +142,17 @@ Com o OpenMES no Docker Desktop da mesma máquina, use `OPENMES_URL=http://host.
 - **Fuso**: o endpoint `/signals` do OpenMES grava o horário recebido sem converter. O conector envia sempre com o
   deslocamento do fuso da fábrica (`2026-10-19T08:00:00.000-03:00`); por isso `OPENMES_TIMEZONE` precisa ser igual
   ao fuso configurado no OpenMES.
-- **Recomeçar do zero**: apague `data/state.json`. O próximo ciclo relê `INITIAL_LOOKBACK_MINUTES`.
+- **Contagem acumulada** (`accumulate`): o total só cresce e fica no `data/state.json`. Contagem que chega atrasada
+  ainda soma, com o horário da última entregue. Por causa do contador "legado" do OpenMES, que usa a primeira leitura
+  como base (não a conta) e guarda o último total em cache por 1 dia:
+  - a primeira entrega da série manda antes uma leitura base 0;
+  - período sem produção (0) também é enviado, para o cache não expirar num fim de semana parado.
+- **Lotes de 100 leituras e 60 s de espera** no OpenMES. O contador "legado" do OpenMES (sem ordem configurada) não
+  ignora leitura repetida: se uma chamada estoura o tempo depois de o OpenMES gravar, o reenvio conta de novo.
+  Lote pequeno mantém cada chamada longe do limite.
+- **Recomeçar do zero**: apague `data/state.json`. O próximo ciclo relê `INITIAL_LOOKBACK_MINUTES`. Com
+  `accumulate`, o total volta a zero e o OpenMES vê o contador "diminuir": limpe também o histórico daquela conexão
+  no OpenMES ou comece por uma conexão nova.
 
 ## Testar sem o jkcontrol (simulador)
 
@@ -178,7 +204,7 @@ contagem fica como eventos de contador da máquina (modo legado do OpenMES).
 npm test
 ```
 
-São 31 testes, incluindo um ciclo completo por HTTP contra um jkcontrol e um OpenMES simulados (paginação, token
+São 38 testes, incluindo um ciclo completo por HTTP contra um jkcontrol e um OpenMES simulados (paginação, token
 expirando, ordem de entrega e fuso) e o simulador lido pelo próprio cliente do conector. O fluxo também foi validado
 contra o OpenMES v0.27.0 real com PostgreSQL e o módulo ativado:
 - estados gravados na hora local;

@@ -7,7 +7,9 @@ import { dirname } from 'node:path';
  *  - vistos: _id das leituras já entregues ao OpenMES, com o horário da leitura,
  *    para não reenviar o que a janela de sobreposição relê;
  *  - ultimoTs: horário da leitura mais nova já entregue (sinais de máquina não
- *    podem andar para trás — ver sync.js).
+ *    podem andar para trás — ver sync.js);
+ *  - total: nas séries com "accumulate", o total já entregue ao OpenMES. Apagar
+ *    o estado zera o total, e o OpenMES trava o contador (reset_required).
  *
  * Gravado de forma atômica (arquivo temporário + rename): uma queda no meio da
  * gravação não corrompe o estado.
@@ -45,6 +47,14 @@ export class Estado {
 
     ultimoEntregue(chave) {
         return this.serie(chave).ultimoTs;
+    }
+
+    total(chave) {
+        return this.serie(chave).total ?? 0;
+    }
+
+    definirTotal(chave, total) {
+        this.serie(chave).total = total;
     }
 
     avancarCursor(chave, ate) {

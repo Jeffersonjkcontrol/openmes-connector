@@ -1,5 +1,8 @@
 import { ErroHttp, requisicao } from './http.js';
 
+/** Tempo limite das chamadas ao OpenMES: gravar um lote de sinais é bem mais lento que ler o jkcontrol. */
+const TEMPO_LIMITE_MS = 60_000;
+
 /**
  * Cliente da API do OpenMES.
  *
@@ -51,6 +54,7 @@ export class OpenMesClient {
             method,
             body,
             headers: { Authorization: `Bearer ${this.token}` },
+            timeoutMs: TEMPO_LIMITE_MS,
         });
 
         try {

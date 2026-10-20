@@ -66,10 +66,26 @@ export function normalizarMaquinas(machines) {
         for (const s of sinais) {
             const variavel = typeof s === 'string' ? s : s?.variable;
             if (!variavel) throw new Error(`${onde}: item de "signals" sem nome de variável.`);
-            series.push({ variavel, tipo: 'sinal', nodeId: (typeof s === 'object' && s.node_id) || `${m.device}/${variavel}` });
+
+            // "accumulate": "sum" — a variável traz a contagem de um período
+            // (ex.: injecao_hora) e o contador do OpenMES espera o total acumulado.
+            const acumular = typeof s === 'object' ? s.accumulate ?? null : null;
+            if (acumular !== null && acumular !== 'sum') {
+                throw new Error(`${onde}: "accumulate" de ${variavel} só aceita "sum".`);
+            }
+
+            series.push({
+                variavel,
+                tipo: 'sinal',
+                nodeId: (typeof s === 'object' && s.node_id) || `${m.device}/${variavel}`,
+                ...(acumular && { acumular: true }),
+            });
         }
-        if (m.operator_variable) series.push({ variavel: m.operator_variable, tipo: 'operador' });
-        if (m.reason_variable) series.push({ variavel: m.reason_variable, tipo: 'motivo' });
+
+        const operador = variavelComCampo(m.operator_variable, 'card_field', `${onde}: "operator_variable"`);
+        if (operador) series.push({ ...operador, tipo: 'operador' });
+        const motivo = variavelComCampo(m.reason_variable, 'code_field', `${onde}: "reason_variable"`);
+        if (motivo) series.push({ ...motivo, tipo: 'motivo' });
 
         if (series.length === 0) {
             throw new Error(`${onde}: nada para ler — informe "signals", "operator_variable" ou "reason_variable".`);
@@ -94,6 +110,26 @@ export function normalizarMaquinas(machines) {
             series,
         };
     });
+}
+
+/**
+ * Cartão e motivo: o nome da variável ("operador") ou um objeto que diz em qual
+ * campo do context vem o UID/código, para firmwares que não seguem o contrato
+ * padrão — ex.: {"variable": "fun_rfid", "card_field": "fun_rfid"}.
+ */
+function variavelComCampo(valor, nomeDoCampo, onde) {
+    if (!valor) return null;
+    if (typeof valor === 'string') return { variavel: valor };
+
+    if (typeof valor !== 'object' || typeof valor.variable !== 'string' || !valor.variable) {
+        throw new Error(`${onde} precisa ser o nome da variável ou {"variable": "...", "${nomeDoCampo}": "..."}.`);
+    }
+    const campo = valor[nomeDoCampo];
+    if (campo !== undefined && (typeof campo !== 'string' || !campo)) {
+        throw new Error(`${onde}: "${nomeDoCampo}" precisa ser o nome de um campo do context.`);
+    }
+
+    return { variavel: valor.variable, ...(campo && { campo }) };
 }
 
 function obrigatoria(env, nome) {

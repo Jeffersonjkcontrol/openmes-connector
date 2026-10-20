@@ -24,6 +24,29 @@ test('cada variável vira uma série com o tipo certo', () => {
     ]);
 });
 
+test('contagem acumulada e campos de cartão/motivo no context', () => {
+    const [m] = normalizarMaquinas([{
+        device: 'injetora000',
+        workstation_id: 9,
+        connection_id: 2,
+        signals: ['parada', { variable: 'injecao_hora', accumulate: 'sum' }],
+        operator_variable: { variable: 'fun_rfid', card_field: 'fun_rfid' },
+        reason_variable: { variable: 'maq_rfid' },
+    }]);
+
+    assert.deepEqual(m.series, [
+        { variavel: 'parada', tipo: 'sinal', nodeId: 'injetora000/parada' },
+        { variavel: 'injecao_hora', tipo: 'sinal', nodeId: 'injetora000/injecao_hora', acumular: true },
+        { variavel: 'fun_rfid', tipo: 'operador', campo: 'fun_rfid' },
+        { variavel: 'maq_rfid', tipo: 'motivo' },
+    ]);
+
+    const base = { device: 'a', workstation_id: 1, connection_id: 1 };
+    assert.throws(() => normalizarMaquinas([{ ...base, signals: [{ variable: 'x', accumulate: 'max' }] }]), /accumulate.*"sum"/);
+    assert.throws(() => normalizarMaquinas([{ ...base, operator_variable: { card_field: 'uid' } }]), /operator_variable.*precisa ser/);
+    assert.throws(() => normalizarMaquinas([{ ...base, reason_variable: { variable: 'm', code_field: 7 } }]), /code_field/);
+});
+
 test('erros de configuração dizem onde está o problema', () => {
     assert.throws(() => normalizarMaquinas([]), /machines/);
     assert.throws(() => normalizarMaquinas([{ signals: ['estado'] }]), /machines\[0\].*device/);
