@@ -82,6 +82,11 @@ export class OpenMesClient {
         return this.chamar('POST', '/api/v1/jk/operator-events', payload);
     }
 
+    /** Cartão de OP lido na máquina: a OP passa a rodar no posto — módulo JkControl. */
+    iniciarOrdem(estacaoId, payload) {
+        return this.chamar('POST', `/api/v1/jk/workstations/${estacaoId}/work-order`, payload);
+    }
+
     /** Motivo de parada digitado na máquina — módulo JkControl. */
     motivoParada(estacaoId, payload) {
         return this.chamar('POST', `/api/v1/jk/workstations/${estacaoId}/downtime-reason`, payload);

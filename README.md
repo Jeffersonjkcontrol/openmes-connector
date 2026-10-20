@@ -26,8 +26,12 @@ A cada ciclo (15 s), para cada variável configurada:
 2. Descarta o que já foi entregue (pelo `_id` da leitura).
 3. Junta tudo, **ordena pelo horário do dispositivo** e entrega ao OpenMES nessa ordem:
    - estado e contadores → endpoint nativo `POST /api/v1/machine-connections/{id}/signals`, em lote;
-   - cartão → `POST /api/v1/jk/operator-events` (módulo JkControl);
+   - cartão de OP → `POST /api/v1/jk/workstations/{id}/work-order` (módulo JkControl, versão 0.2.0 ou mais nova):
+     a OP passa a rodar naquela máquina e recebe as contagens dela;
+   - cartão do operador → `POST /api/v1/jk/operator-events` (módulo JkControl);
    - motivo de parada → `POST /api/v1/jk/workstations/{id}/downtime-reason` (módulo JkControl).
+
+   No mesmo instante, estado e contagem entram antes da troca de OP (a contagem que fecha uma OP fica com ela).
 4. Grava o progresso em `data/state.json` depois de cada entrega.
 
 ## O que o dispositivo publica
@@ -87,6 +91,7 @@ cp config.example.json config.json   # máquinas
 | `signals` | variáveis de estado/contador. O endereço da tag é `{device}/{variável}`; para outro, use `{"variable": "estado", "node_id": "INJ01.state"}`. Para uma variável que traz a **contagem do período** (zera a cada envio), use `{"variable": "injecao_hora", "accumulate": "sum"}`: o conector entrega o total acumulado, que é o que o contador do OpenMES espera |
 | `operator_variable` | variável do cartão RFID. Se o UID vem em outro campo do `context`, use `{"variable": "fun_rfid", "card_field": "fun_rfid"}` |
 | `reason_variable` | variável do motivo de parada. Se o código vem num campo do `context` (e o valor é sempre 1), use `{"variable": "maq_rfid", "code_field": "maq_rfid"}` |
+| `order_variable` | variável do cartão de OP (ordem de produção). O número vem no valor ou em `context.order_no`; num campo próprio, use `{"variable": "op_rfid", "code_field": "op_rfid"}`. A OP precisa existir no OpenMES (planejamento, *Admin → Import* ou API do ERP); OP desconhecida, encerrada ou em espera é recusada com aviso no log |
 
 Exemplo para o firmware Nitron v1.5 (injetora), que não segue o contrato acima:
 
@@ -97,7 +102,8 @@ Exemplo para o firmware Nitron v1.5 (injetora), que não segue o contrato acima:
   "connection_id": 2,
   "signals": ["parada", { "variable": "injecao_hora", "accumulate": "sum" }],
   "operator_variable": { "variable": "fun_rfid", "card_field": "fun_rfid" },
-  "reason_variable": { "variable": "maq_rfid", "code_field": "maq_rfid" }
+  "reason_variable": { "variable": "maq_rfid", "code_field": "maq_rfid" },
+  "order_variable": { "variable": "op_rfid", "code_field": "op_rfid" }
 }
 ```
 
@@ -204,7 +210,7 @@ contagem fica como eventos de contador da máquina (modo legado do OpenMES).
 npm test
 ```
 
-São 38 testes, incluindo um ciclo completo por HTTP contra um jkcontrol e um OpenMES simulados (paginação, token
+São 41 testes, incluindo um ciclo completo por HTTP contra um jkcontrol e um OpenMES simulados (paginação, token
 expirando, ordem de entrega e fuso) e o simulador lido pelo próprio cliente do conector. O fluxo também foi validado
 contra o OpenMES v0.27.0 real com PostgreSQL e o módulo ativado:
 - estados gravados na hora local;

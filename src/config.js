@@ -82,6 +82,8 @@ export function normalizarMaquinas(machines) {
             });
         }
 
+        const ordem = variavelComCampo(m.order_variable, 'code_field', `${onde}: "order_variable"`);
+        if (ordem) series.push({ ...ordem, tipo: 'ordem' });
         const operador = variavelComCampo(m.operator_variable, 'card_field', `${onde}: "operator_variable"`);
         if (operador) series.push({ ...operador, tipo: 'operador' });
         const motivo = variavelComCampo(m.reason_variable, 'code_field', `${onde}: "reason_variable"`);

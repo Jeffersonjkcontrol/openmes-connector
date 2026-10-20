@@ -43,8 +43,8 @@ let falhasSeguidas = 0;
 while (!parar) {
     try {
         const r = await executarCiclo({ config, jk, mes, estado, log });
-        if (r.sinais || r.operador || r.motivo || r.descartados) {
-            log.info(`ciclo: ${r.sinais} sinal(is), ${r.operador} cartão(ões), ${r.motivo} motivo(s), ${r.descartados} descartado(s).`);
+        if (r.sinais || r.ordem || r.operador || r.motivo || r.descartados) {
+            log.info(`ciclo: ${r.sinais} sinal(is), ${r.ordem} OP(s), ${r.operador} cartão(ões), ${r.motivo} motivo(s), ${r.descartados} descartado(s).`);
         }
         falhasSeguidas = 0;
     } catch (erro) {

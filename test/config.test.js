@@ -41,6 +41,12 @@ test('contagem acumulada e campos de cartão/motivo no context', () => {
         { variavel: 'maq_rfid', tipo: 'motivo' },
     ]);
 
+    const [comOp] = normalizarMaquinas([{
+        device: 'injetora000', workstation_id: 9, order_variable: { variable: 'op_rfid', code_field: 'op_rfid' },
+    }]);
+    assert.deepEqual(comOp.series, [{ variavel: 'op_rfid', tipo: 'ordem', campo: 'op_rfid' }]);
+    assert.throws(() => normalizarMaquinas([{ device: 'a', order_variable: 'op' }]), /workstation_id/);
+
     const base = { device: 'a', workstation_id: 1, connection_id: 1 };
     assert.throws(() => normalizarMaquinas([{ ...base, signals: [{ variable: 'x', accumulate: 'max' }] }]), /accumulate.*"sum"/);
     assert.throws(() => normalizarMaquinas([{ ...base, operator_variable: { card_field: 'uid' } }]), /operator_variable.*precisa ser/);

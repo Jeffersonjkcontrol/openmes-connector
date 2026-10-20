@@ -52,7 +52,7 @@ class JkFalso {
 class MesFalso {
     constructor() {
         this.chamadas = [];
-        this.falhas = { sinais: [], operador: [], motivo: [] };
+        this.falhas = { sinais: [], ordem: [], operador: [], motivo: [] };
     }
 
     registrar(tipo, dados) {
@@ -69,6 +69,11 @@ class MesFalso {
     async eventoOperador(payload) {
         this.registrar('operador', payload);
         return { status: payload.action === 'login' ? 'logged_in' : 'logged_out' };
+    }
+
+    async iniciarOrdem(estacaoId, payload) {
+        this.registrar('ordem', { estacaoId, ...payload });
+        return { status: 'started' };
     }
 
     async motivoParada(estacaoId, payload) {
@@ -379,6 +384,42 @@ test('cartão e código de motivo podem vir em campos próprios do context', asy
     assert.equal(motivo.estacaoId, 9);
     assert.equal(r.descartados, 1);
     assert.match(avisos.join('\n'), /sem o UID do cartão em context\.fun_rfid/);
+});
+
+test('cartão de OP inicia a ordem no posto, depois da contagem que fecha a anterior', async () => {
+    const { mes, ciclo } = cenario({
+        'injetora000/parada': [],
+        'injetora000/fun_rfid': [],
+        'injetora000/maq_rfid': [],
+        // O firmware fecha a contagem da OP anterior e publica a nova OP em seguida.
+        'injetora000/injecao_hora': [{ id: 'h1', ts: T('10:00:00'), value: 40, context: { op_rfid: '500101' } }],
+        'injetora000/op_rfid': [
+            { id: 'o1', ts: T('10:00:00'), value: 1, context: { op_rfid: '500102' } },
+            { id: 'o2', ts: T('10:05:00'), value: 1, context: {} },
+        ],
+    }, [{ ...nitron, order_variable: { variable: 'op_rfid', code_field: 'op_rfid' } }]);
+
+    const r = await ciclo(T('10:06:00'));
+
+    assert.deepEqual(mes.entregas().map((c) => c.tipo), ['sinais', 'ordem']);
+    const ordem = mes.entregas()[1];
+    assert.deepEqual(ordem, { tipo: 'ordem', estacaoId: 9, order_no: '500102', occurred_at: '2026-10-19T07:00:00.000-03:00' });
+    assert.equal(r.ordem, 1);
+    assert.equal(r.descartados, 1, 'cartão de OP sem número é ignorado');
+});
+
+test('OP que o OpenMES não conhece é descartada com aviso e não trava a fila', async () => {
+    const { mes, avisos, ciclo } = cenario({
+        'injetora01/op': [{ id: 'o1', ts: T('10:00:00'), value: 555 }],
+        'injetora01/estado': [{ id: 'e1', ts: T('10:01:00'), value: 1 }],
+    }, [{ device: 'injetora01', workstation_id: 3, connection_id: 1, signals: ['estado'], order_variable: 'op' }]);
+
+    mes.falhas.ordem.push(new ErroHttp(422, { message: 'No work order has this number.' }, 'mes'));
+    const r = await ciclo(T('10:02:00'));
+
+    assert.deepEqual(mes.entregas().map((c) => c.tipo), ['sinais']);
+    assert.equal(r.descartados, 1);
+    assert.match(avisos.join('\n'), /No work order has this number/);
 });
 
 test('muitas leituras de sinal vão em lotes pequenos, na ordem', async () => {

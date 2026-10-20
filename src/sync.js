@@ -1,8 +1,11 @@
 import { ErroHttp } from './http.js';
 import { formatarNoFuso } from './time.js';
 
-/** No mesmo instante, o estado da máquina entra antes do cartão e do motivo. */
-const PRIORIDADE = { sinal: 0, operador: 1, motivo: 2 };
+/**
+ * No mesmo instante: estado e contagem primeiro (a contagem que fecha uma OP
+ * fica com ela), depois a troca de OP, o cartão do operador e o motivo.
+ */
+const PRIORIDADE = { sinal: 0, ordem: 1, operador: 2, motivo: 3 };
 
 /**
  * Leituras por chamada ao /signals (o OpenMES aceita até 1000). Lote pequeno
@@ -114,6 +117,7 @@ export async function executarCiclo({ config, jk, mes, estado, log, agora = new 
 
     const resumo = {
         sinais: 0,
+        ordem: 0,
         operador: 0,
         motivo: 0,
         descartados: [...atrasados.values()].reduce((s, n) => s + n, 0) + parcelasInvalidas,
@@ -184,16 +188,17 @@ export function montarEvento(maquina, serie, chave, item) {
         return { ...base, estacaoId: maquina.estacaoId, acao, uid: String(uid) };
     }
 
-    // motivo de parada: o código vem no valor (o jkcontrol só guarda número);
-    // context.reason_code permite códigos com letras. 0 = "sem motivo". Com
-    // "code_field", o código vem só daquele campo do context (o valor é ignorado).
+    // Motivo de parada e OP: o código vem no valor (o jkcontrol só guarda número);
+    // context.reason_code / context.order_no permitem códigos com letras; 0 = nada.
+    // Com "code_field", o código vem só daquele campo do context (o valor é ignorado).
     if (serie.campo) {
         const doCartao = item.context?.[serie.campo];
         if (!doCartao) return { ...base, ignorar: `sem código em context.${serie.campo}` };
         return { ...base, estacaoId: maquina.estacaoId, codigo: String(doCartao) };
     }
-    const codigo = item.context?.reason_code ?? (Number(item.value) > 0 ? String(item.value) : null);
-    if (!codigo) return { ...base, ignorar: 'motivo 0 (sem motivo)' };
+    const doContext = serie.tipo === 'ordem' ? item.context?.order_no : item.context?.reason_code;
+    const codigo = doContext ?? (Number(item.value) > 0 ? String(item.value) : null);
+    if (!codigo) return { ...base, ignorar: serie.tipo === 'ordem' ? 'OP 0 (sem OP)' : 'motivo 0 (sem motivo)' };
 
     return { ...base, estacaoId: maquina.estacaoId, codigo: String(codigo) };
 }
@@ -250,6 +255,10 @@ async function enviarEventoModulo(evento, { config, mes, estado, log, resumo }) 
             });
             log.info(`${evento.chave}: cartão ${evento.uid} ${evento.acao} → ${r?.status ?? 'ok'}`);
             resumo.operador += 1;
+        } else if (evento.tipo === 'ordem') {
+            const r = await mes.iniciarOrdem(evento.estacaoId, { order_no: evento.codigo, occurred_at: quando });
+            log.info(`${evento.chave}: OP ${evento.codigo} → ${r?.status ?? 'ok'}`);
+            resumo.ordem += 1;
         } else {
             const r = await mes.motivoParada(evento.estacaoId, { reason_code: evento.codigo, occurred_at: quando });
             log.info(`${evento.chave}: motivo ${evento.codigo} → parada ${r?.data?.downtime_id ?? '?'}`);
